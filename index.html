@@ -463,9 +463,40 @@ select option{background:var(--bg3);color:var(--text)}
   .contas-grid{grid-template-columns:1fr}
 }
 @media(max-width:600px){
-  .container{padding:1rem}
-  header{padding:8px 1rem;flex-wrap:wrap;height:auto;gap:8px}
-  .month-nav{order:3;width:100%;justify-content:center;padding-bottom:4px}
+  .container{padding:.75rem}
+
+  /* Header empilhado no celular */
+  header{padding:8px 1rem;flex-wrap:wrap;height:auto;gap:6px}
+  .logo{font-size:.95rem}
+  .month-nav{order:3;width:100%;justify-content:center;padding-bottom:2px}
+  #current-month{font-size:.82rem;min-width:110px}
+  .month-nav button{width:26px;height:26px;font-size:12px}
+  .header-right{gap:6px}
+  .user-badge{font-size:.72rem;padding:4px 8px}
+  .group-badge{font-size:.68rem;padding:4px 8px}
+  .btn-secondary{font-size:.72rem;padding:4px 8px}
+
+  /* Cards menores */
+  .summary-grid{grid-template-columns:repeat(2,1fr);gap:8px}
+  .summary-card{padding:.75rem .9rem}
+  .card-value{font-size:1.1rem}
+  .card-label{font-size:.65rem}
+  .card-sub{font-size:.62rem}
+
+  /* Forms em coluna única */
+  .form-row{grid-template-columns:1fr}
+  .panel{padding:1rem}
+
+  /* Login */
+  .login-box{padding:1.5rem 1.2rem}
+  .login-logo{font-size:1.2rem}
+  .radio-group{flex-direction:column}
+  .radio-opt{padding:10px}
+
+  /* Contas */
+  .contas-grid{grid-template-columns:1fr}
+  .conta-header{flex-direction:column;gap:6px}
+  .participante-row{flex-wrap:wrap;gap:4px}
 }
 </style>
 </head>

@@ -6,6 +6,7 @@
 <title>SalvaMoney</title>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <!-- ================================================
      🔥 COLE AQUI A CONFIG DO SEU FIREBASE
@@ -143,6 +144,7 @@ window.addExpense = async function() {
 }
 
 window.deleteExpense = async function(id) {
+  if (!confirm('Tem certeza que quer excluir este gasto?')) return;
   await remove(ref(db, `${expPath()}/${id}`));
   await renderExpenses();
   await updateSummary();
@@ -181,7 +183,270 @@ window.togglePago = async function(billId, pKey) {
 }
 
 window.deleteBill = async function(id) {
+  if (!confirm('Excluir esta conta a dividir?')) return;
   await remove(ref(db, `${billPath()}/${id}`));
+}
+
+
+// ─── LIMITES POR CATEGORIA ───────────────────────────────
+function limitePath() { return `grupos/${currentGroup}/usuarios/${currentUser}/limites`; }
+
+window.salvarLimites = async function() {
+  const cats = Object.keys(CAT_COLORS);
+  const limites = {};
+  cats.forEach(c => {
+    const el = document.getElementById('lim-' + c);
+    if (el && parseFloat(el.value) > 0) limites[c] = parseFloat(el.value);
+  });
+  await set(ref(db, limitePath()), limites);
+  await renderExpenses();
+  await updateSummary();
+  alert('Limites salvos!');
+}
+
+async function loadLimites() {
+  const snap = await get(ref(db, limitePath()));
+  const limites = snap.val() || {};
+  Object.entries(limites).forEach(([cat, val]) => {
+    const el = document.getElementById('lim-' + cat);
+    if (el) el.value = val;
+  });
+  return limites;
+}
+
+// ─── EXPORTAR PDF ────────────────────────────────────────
+window.exportarPDF = async function() {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+
+  const snap = await get(ref(db, expPath()));
+  const budgetSnap = await get(ref(db, budgetPath()));
+  const data = snap.val() || {};
+  const budget = budgetSnap.val() || 0;
+  const items = Object.values(data).sort((a,b) => a.date.localeCompare(b.date));
+  const total = items.reduce((a,e) => a + e.value, 0);
+
+  // Header
+  doc.setFillColor(10, 22, 40);
+  doc.rect(0, 0, 210, 35, 'F');
+  doc.setTextColor(0, 200, 150);
+  doc.setFontSize(20);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SalvaMoney', 14, 15);
+  doc.setTextColor(200, 210, 255);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Relatório de ${MONTHS[viewMonth]} ${viewYear}`, 14, 24);
+  doc.text(`Usuário: ${currentUser}`, 14, 31);
+
+  // Resumo
+  doc.setTextColor(30, 30, 30);
+  doc.setFontSize(12);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Resumo', 14, 48);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.text(`Orçamento: ${fmt(budget)}`, 14, 56);
+  doc.text(`Total Gasto: ${fmt(total)}`, 14, 63);
+  doc.text(`Saldo: ${fmt(budget - total)}`, 14, 70);
+
+  // Tabela de gastos
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.text('Gastos do Mês', 14, 84);
+
+  // Cabeçalho tabela
+  doc.setFillColor(10, 22, 40);
+  doc.rect(14, 88, 182, 8, 'F');
+  doc.setTextColor(255,255,255);
+  doc.setFontSize(9);
+  doc.text('Data', 16, 94);
+  doc.text('Descrição', 40, 94);
+  doc.text('Categoria', 110, 94);
+  doc.text('Valor', 168, 94);
+
+  let y = 102;
+  doc.setTextColor(30,30,30);
+  items.forEach((e, i) => {
+    if (y > 270) { doc.addPage(); y = 20; }
+    if (i % 2 === 0) { doc.setFillColor(240,244,255); doc.rect(14, y-5, 182, 8, 'F'); }
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    const d = new Date(e.date+'T12:00:00');
+    doc.text(d.toLocaleDateString('pt-BR'), 16, y);
+    doc.text(e.desc.substring(0,35), 40, y);
+    doc.text(e.cat, 110, y);
+    doc.text(fmt(e.value), 160, y);
+    y += 8;
+  });
+
+  // Total final
+  y += 4;
+  doc.setFillColor(10, 22, 40);
+  doc.rect(14, y-5, 182, 9, 'F');
+  doc.setTextColor(255,255,255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.text('TOTAL', 110, y+1);
+  doc.text(fmt(total), 160, y+1);
+
+  doc.save(`SalvaMoney_${MONTHS[viewMonth]}_${viewYear}.pdf`);
+}
+
+// ─── GRÁFICO COMPARAÇÃO DE MESES ─────────────────────────
+let compChart = null;
+async function renderCompChart() {
+  const labels = [];
+  const values = [];
+  for (let i = 5; i >= 0; i--) {
+    let m = viewMonth - i;
+    let y = viewYear;
+    while (m < 0) { m += 12; y--; }
+    labels.push(MONTHS[m].substring(0,3));
+    const snap = await get(ref(db, `grupos/${currentGroup}/usuarios/${currentUser}/gastos/${y}_${m}`));
+    const total = Object.values(snap.val()||{}).reduce((a,e) => a+e.value, 0);
+    values.push(total);
+  }
+
+  if (compChart) compChart.destroy();
+  const ctx = document.getElementById('compChart').getContext('2d');
+  compChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Total Gasto',
+        data: values,
+        backgroundColor: values.map((v,i) => i === 5 ? '#00c896cc' : '#4db8ffcc'),
+        borderColor:     values.map((v,i) => i === 5 ? '#00c896' : '#4db8ff'),
+        borderWidth: 2,
+        borderRadius: 6
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => ` ${fmt(ctx.parsed.y)}` } }
+      },
+      scales: {
+        x: { ticks: { color: '#8ba0cc' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        y: { ticks: { color: '#8ba0cc', callback: v => 'R$' + v.toLocaleString('pt-BR') }, grid: { color: 'rgba(255,255,255,0.05)' } }
+      }
+    }
+  });
+}
+
+
+// ─── EDITAR GASTO ────────────────────────────────────────
+window.abrirEditar = function(id, desc, value, cat, date) {
+  document.getElementById('edit-id').value    = id;
+  document.getElementById('edit-desc').value  = desc;
+  document.getElementById('edit-value').value = value;
+  document.getElementById('edit-date').value  = date;
+  document.getElementById('edit-cat').value   = cat;
+  document.getElementById('modal-editar').style.display = 'flex';
+}
+
+window.fecharEditar = function() {
+  document.getElementById('modal-editar').style.display = 'none';
+}
+
+window.salvarEdicao = async function() {
+  const id    = document.getElementById('edit-id').value;
+  const desc  = document.getElementById('edit-desc').value.trim();
+  const value = parseFloat(document.getElementById('edit-value').value);
+  const cat   = document.getElementById('edit-cat').value;
+  const date  = document.getElementById('edit-date').value;
+
+  if (!desc || !value || !date) { alert('Preencha todos os campos.'); return; }
+
+  await set(ref(db, `${expPath()}/${id}`), { desc, value, cat, date, user: currentUser });
+  fecharEditar();
+  await renderExpenses();
+  await updateSummary();
+}
+
+// ─── GASTOS FIXOS ────────────────────────────────────────
+function fixosPath() { return `grupos/${currentGroup}/usuarios/${currentUser}/fixos`; }
+
+window.addFixo = async function() {
+  const desc = document.getElementById('fixo-desc').value.trim();
+  const value = parseFloat(document.getElementById('fixo-value').value);
+  const cat   = document.getElementById('fixo-cat').value;
+  const dia   = parseInt(document.getElementById('fixo-dia').value) || 1;
+
+  if (!desc)             { alert('Informe uma descrição.'); return; }
+  if (!value || value<=0){ alert('Informe um valor válido.'); return; }
+
+  await push(ref(db, fixosPath()), { desc, value, cat, dia });
+
+  document.getElementById('fixo-desc').value  = '';
+  document.getElementById('fixo-value').value = '';
+  renderFixos();
+}
+
+window.deleteFixo = async function(id) {
+  if (!confirm('Excluir este gasto fixo?')) return;
+  await remove(ref(db, `${fixosPath()}/${id}`));
+  renderFixos();
+}
+
+window.aplicarFixos = async function() {
+  const snap = await get(ref(db, fixosPath()));
+  const fixos = snap.val() || {};
+  const entries = Object.values(fixos);
+  if (!entries.length) { alert('Nenhum gasto fixo cadastrado.'); return; }
+
+  const hoje = new Date();
+  let adicionados = 0;
+  for (const f of entries) {
+    const dia = f.dia || 1;
+    const dateStr = `${viewYear}-${String(viewMonth+1).padStart(2,'0')}-${String(dia).padStart(2,'0')}`;
+    await push(ref(db, expPath()), { desc: f.desc, value: f.value, cat: f.cat, date: dateStr, user: currentUser, fixo: true });
+    adicionados++;
+  }
+  await renderExpenses();
+  await updateSummary();
+  alert(`${adicionados} gasto(s) fixo(s) aplicado(s) em ${MONTHS[viewMonth]}!`);
+}
+
+async function renderFixos() {
+  const snap = await get(ref(db, fixosPath()));
+  const data = snap.val() || {};
+  const container = document.getElementById('fixos-list');
+  const entries = Object.entries(data);
+
+  if (!entries.length) {
+    container.innerHTML = `<div class="empty"><p>Nenhum gasto fixo cadastrado</p></div>`;
+    return;
+  }
+
+  container.innerHTML = entries.map(([id,f]) => `
+    <div class="expense-item">
+      <div class="expense-info">
+        <div class="expense-desc">${f.desc}
+          <span class="badge" style="background:${(CAT_COLORS[f.cat]||'#636e72')}22;color:${CAT_COLORS[f.cat]||'#636e72'}">${f.cat}</span>
+        </div>
+        <div class="expense-meta">Todo dia ${f.dia||1}</div>
+      </div>
+      <span class="expense-amount">${fmt(f.value)}</span>
+      <button class="btn btn-danger" onclick="deleteFixo('${id}')">✕</button>
+    </div>
+  `).join('');
+}
+
+
+// ─── META DE ECONOMIA ────────────────────────────────────
+function metaPath() { return `grupos/${currentGroup}/usuarios/${currentUser}/meta`; }
+
+window.salvarMeta = async function() {
+  const val = parseFloat(document.getElementById('meta-value').value);
+  if (!val || val <= 0) { alert('Informe um valor válido.'); return; }
+  await set(ref(db, metaPath()), val);
+  await updateSummary();
+  alert('Meta salva!');
 }
 
 // ─── RENDER ──────────────────────────────────────────────
@@ -207,10 +472,12 @@ async function renderExpenses() {
       <div class="expense-info">
         <div class="expense-desc">${e.desc}
           <span class="badge" style="background:${color}22;color:${color}">${e.cat}</span>
+          ${e.fixo ? '<span class="badge" style="background:rgba(74,184,255,0.15);color:var(--info)">fixo</span>' : ''}
         </div>
         <div class="expense-meta">${ds}</div>
       </div>
       <span class="expense-amount">${fmt(e.value)}</span>
+      <button class="btn btn-edit" onclick="abrirEditar('${id}','${e.desc.replace(/'/g,"\'")}',${e.value},'${e.cat}','${e.date}')">✏️</button>
       <button class="btn btn-danger" onclick="deleteExpense('${id}')">✕</button>
     </div>`;
   }).join('');
@@ -218,7 +485,7 @@ async function renderExpenses() {
   renderChart(data);
 }
 
-function renderChart(data) {
+async function renderChart(data) {
   const totals = {};
   for (const e of Object.values(data)) totals[e.cat] = (totals[e.cat]||0) + e.value;
   const labels = Object.keys(totals);
@@ -241,12 +508,25 @@ function renderChart(data) {
   });
 
   const total = values.reduce((a,b)=>a+b,0);
+  const limSnap = await get(ref(db, limitePath()));
+  const limites = limSnap.val() || {};
   breakdown.innerHTML = labels.map((l,i) => {
     const pct = total ? Math.round((values[i]/total)*100) : 0;
+    const lim = limites[l] || 0;
+    const limPct = lim ? Math.min(100, Math.round((values[i]/lim)*100)) : 0;
+    const over = lim && values[i] > lim;
+    const limBar = lim ? `<div style="margin-top:3px;font-size:.65rem;color:${over?'var(--danger)':'var(--muted)'}">
+      Limite: ${fmt(lim)} · ${limPct}% usado ${over?'⚠️ EXCEDIDO':''}
+      <div style="height:3px;background:var(--bg2);border-radius:2px;margin-top:2px">
+        <div style="width:${limPct}%;height:100%;background:${over?'var(--danger)':'var(--accent)'};border-radius:2px"></div>
+      </div></div>` : '';
     return `<div class="budget-row">
       <div class="budget-cat"><div class="cat-dot" style="background:${colors[i]}"></div><span>${l}</span></div>
-      <div class="budget-bar-wrap"><div class="budget-bar" style="width:${pct}%;background:${colors[i]}"></div></div>
-      <div class="budget-vals">${fmt(values[i])} · ${pct}%</div>
+      <div style="flex:1;margin:0 10px">
+        <div style="display:flex;justify-content:space-between;font-size:.75rem;color:var(--muted)">${fmt(values[i])} · ${pct}%</div>
+        <div class="budget-bar-wrap" style="margin:3px 0 0"><div class="budget-bar" style="width:${pct}%;background:${colors[i]}"></div></div>
+        ${limBar}
+      </div>
     </div>`;
   }).join('');
 }
@@ -291,10 +571,11 @@ function renderBills() {
 }
 
 async function updateSummary() {
-  const [expSnap, budgetSnap, billSnap] = await Promise.all([
+  const [expSnap, budgetSnap, billSnap, metaSnap] = await Promise.all([
     get(ref(db, expPath())),
     get(ref(db, budgetPath())),
-    get(ref(db, billPath()))
+    get(ref(db, billPath())),
+    get(ref(db, metaPath()))
   ]);
 
   const expenses = Object.values(expSnap.val()||{});
@@ -304,6 +585,7 @@ async function updateSummary() {
   const bills    = Object.values(billSnap.val()||{});
   const billsTotal = bills.reduce((a,b)=>a+b.value,0);
   const pendentes = bills.reduce((a,b)=>a+Object.values(b.participantes||{}).filter(p=>!p.pago).length,0);
+  const meta     = metaSnap.val()||0;
 
   document.getElementById('summary-budget').textContent = fmt(budget);
   document.getElementById('summary-spent').textContent  = fmt(total);
@@ -315,15 +597,34 @@ async function updateSummary() {
   document.getElementById('summary-bills').textContent = fmt(billsTotal);
   document.getElementById('summary-bills-sub').textContent = `${bills.length} conta${bills.length!==1?'s':''} · ${pendentes} pendente${pendentes!==1?'s':''}`;
   document.getElementById('current-month').textContent = `${MONTHS[viewMonth]} ${viewYear}`;
-
   if (budget) document.getElementById('budget-input').placeholder = `Atual: ${budget}`;
+
+  // Meta de economia
+  if (meta > 0) {
+    const economizado = Math.max(0, remaining);
+    const pct = Math.min(100, Math.round((economizado/meta)*100));
+    const atingiu = economizado >= meta;
+    document.getElementById('meta-section').style.display = 'block';
+    document.getElementById('meta-value').value = meta;
+    document.getElementById('meta-progress-bar').style.width = pct+'%';
+    document.getElementById('meta-progress-bar').style.background = atingiu ? 'var(--accent)' : 'var(--warning)';
+    document.getElementById('meta-status').textContent = atingiu
+      ? `🎉 Meta atingida! Você economizou ${fmt(economizado)}`
+      : `${fmt(economizado)} de ${fmt(meta)} (${pct}%) — faltam ${fmt(meta-economizado)}`;
+    document.getElementById('meta-status').style.color = atingiu ? 'var(--accent)' : 'var(--warning)';
+  } else {
+    document.getElementById('meta-section').style.display = 'none';
+  }
 }
 
 async function render() {
   document.getElementById('current-month').textContent = `${MONTHS[viewMonth]} ${viewYear}`;
+  await loadLimites();
   await renderExpenses();
   renderBills();
   await updateSummary();
+  renderCompChart();
+  renderFixos();
 }
 
 // ─── AUTO LOGIN ──────────────────────────────────────────
@@ -422,6 +723,10 @@ select option{background:var(--bg3);color:var(--text)}
 .btn-danger{background:transparent;color:var(--danger);border:1px solid rgba(255,92,92,.3);padding:5px 9px;font-size:.75rem}.btn-danger:hover{background:rgba(255,92,92,.1)}
 .btn-secondary{background:var(--bg3);color:var(--text);border:1px solid var(--border2)}.btn-secondary:hover{background:var(--border)}
 .btn-sm{padding:5px 11px;font-size:.75rem}.btn-full{width:100%}
+
+.day-group{margin-bottom:10px}
+.day-header{display:flex;justify-content:space-between;align-items:center;padding:5px 4px;font-size:.72rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border);margin-bottom:5px}
+.btn-edit{background:transparent;color:var(--info);border:1px solid rgba(77,184,255,.3);padding:5px 9px;font-size:.75rem}.btn-edit:hover{background:rgba(77,184,255,.1)}
 
 /* EXPENSE LIST */
 .expense-list{max-height:290px;overflow-y:auto;padding-right:3px}
@@ -674,8 +979,176 @@ select option{background:var(--bg3);color:var(--text)}
         </div>
       </div>
     </div>
+
+
+
+    <!-- META DE ECONOMIA -->
+    <div class="panel" style="margin-bottom:1.5rem">
+      <div class="panel-title">🎯 Meta de Economia do Mês</div>
+      <div class="form-row" style="align-items:flex-end;margin-bottom:.75rem">
+        <div class="form-group" style="margin-bottom:0">
+          <label>Quanto quer economizar este mês? (R$)</label>
+          <input type="number" id="meta-value" placeholder="Ex: 500" min="0" step="0.01" />
+        </div>
+        <button class="btn btn-primary" onclick="salvarMeta()">💾 Salvar Meta</button>
+      </div>
+      <div id="meta-section" style="display:none">
+        <div style="background:var(--bg3);border-radius:var(--radius-sm);padding:12px;margin-top:.5rem">
+          <div style="height:10px;background:var(--bg2);border-radius:5px;overflow:hidden;margin-bottom:8px">
+            <div id="meta-progress-bar" style="height:100%;border-radius:5px;transition:width .5s ease;width:0%"></div>
+          </div>
+          <div id="meta-status" style="font-size:.82rem;font-weight:600"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GASTOS FIXOS -->
+    <div class="panel" style="margin-bottom:1.5rem">
+      <div class="panel-title">
+        <span>🔁 Gastos Fixos Mensais</span>
+        <button class="btn btn-primary btn-sm" onclick="aplicarFixos()">▶ Aplicar neste mês</button>
+      </div>
+      <div class="main-grid" style="margin-bottom:.75rem">
+        <div>
+          <div class="form-group">
+            <label>Descrição</label>
+            <input type="text" id="fixo-desc" placeholder="Ex: Aluguel, Netflix..." />
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Valor (R$)</label>
+              <input type="number" id="fixo-value" placeholder="0,00" min="0" step="0.01" />
+            </div>
+            <div class="form-group">
+              <label>Dia do mês</label>
+              <input type="number" id="fixo-dia" placeholder="Ex: 5" min="1" max="31" value="1" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Categoria</label>
+            <select id="fixo-cat">
+              <option value="Moradia">🏠 Moradia</option>
+              <option value="Alimentação">🍕 Alimentação</option>
+              <option value="Transporte">🚗 Transporte</option>
+              <option value="Saúde">❤️ Saúde</option>
+              <option value="Lazer">🎮 Lazer</option>
+              <option value="Educação">📚 Educação</option>
+              <option value="Roupas">👕 Roupas</option>
+              <option value="Academia">🏋️ Academia</option>
+              <option value="Outros">📦 Outros</option>
+            </select>
+          </div>
+          <button class="btn btn-primary btn-full" onclick="addFixo()">+ Adicionar Fixo</button>
+        </div>
+        <div>
+          <div id="fixos-list"><div class="empty"><p>Nenhum gasto fixo cadastrado</p></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COMPARAÇÃO DE MESES -->
+    <div class="panel" style="margin-bottom:1.5rem">
+      <div class="panel-title">
+        <span>Comparação dos Últimos 6 Meses</span>
+      </div>
+      <div style="height:220px">
+        <canvas id="compChart" role="img" aria-label="Gráfico comparativo de meses">Comparação de gastos mensais.</canvas>
+      </div>
+    </div>
+
+    <!-- LIMITES POR CATEGORIA -->
+    <div class="panel" style="margin-bottom:1.5rem">
+      <div class="panel-title">Limite de Gasto por Categoria</div>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:1rem">Defina um limite mensal por categoria. Você será avisado quando ultrapassar. 🔔</p>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+        <div class="form-group">
+          <label>Alimentação (R$)</label>
+          <input type="number" id="lim-Alimentação" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Moradia (R$)</label>
+          <input type="number" id="lim-Moradia" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Transporte (R$)</label>
+          <input type="number" id="lim-Transporte" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Saúde (R$)</label>
+          <input type="number" id="lim-Saúde" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Lazer (R$)</label>
+          <input type="number" id="lim-Lazer" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Educação (R$)</label>
+          <input type="number" id="lim-Educação" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Roupas (R$)</label>
+          <input type="number" id="lim-Roupas" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Academia (R$)</label>
+          <input type="number" id="lim-Academia" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+        <div class="form-group">
+          <label>Outros (R$)</label>
+          <input type="number" id="lim-Outros" placeholder="Sem limite" min="0" step="0.01" />
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="salvarLimites()" style="margin-top:.5rem">💾 Salvar Limites</button>
+    </div>
+
+    <!-- EXPORTAR PDF -->
+    <div style="text-align:center;margin-bottom:2rem">
+      <button class="btn btn-primary" onclick="exportarPDF()" style="padding:12px 32px;font-size:.95rem">
+        📄 Exportar Gastos do Mês em PDF
+      </button>
+    </div>
   </div>
 </div>
 
+
+<!-- MODAL EDITAR GASTO -->
+<div id="modal-editar" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999;align-items:center;justify-content:center;padding:1rem">
+  <div style="background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:1.5rem;width:100%;max-width:400px">
+    <div style="font-size:1rem;font-weight:600;margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center">
+      ✏️ Editar Gasto
+      <button class="btn btn-danger btn-sm" onclick="fecharEditar()">✕</button>
+    </div>
+    <input type="hidden" id="edit-id" />
+    <div class="form-group">
+      <label>Descrição</label>
+      <input type="text" id="edit-desc" />
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Valor (R$)</label>
+        <input type="number" id="edit-value" min="0" step="0.01" />
+      </div>
+      <div class="form-group">
+        <label>Categoria</label>
+        <select id="edit-cat">
+          <option value="Alimentação">🍕 Alimentação</option>
+          <option value="Moradia">🏠 Moradia</option>
+          <option value="Transporte">🚗 Transporte</option>
+          <option value="Saúde">❤️ Saúde</option>
+          <option value="Lazer">🎮 Lazer</option>
+          <option value="Educação">📚 Educação</option>
+          <option value="Roupas">👕 Roupas</option>
+          <option value="Academia">🏋️ Academia</option>
+          <option value="Outros">📦 Outros</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Data</label>
+      <input type="date" id="edit-date" />
+    </div>
+    <button class="btn btn-primary btn-full" onclick="salvarEdicao()">💾 Salvar Alterações</button>
+  </div>
+</div>
 </body>
 </html>

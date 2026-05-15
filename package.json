@@ -1,7 +1,7 @@
 {
   "name": "salvamoney-bot",
-  "version": "1.1.0",
-  "description": "Bot WhatsApp SalvaMoney via Z-API",
+  "version": "2.0.1",
+  "description": "Bot WhatsApp SalvaMoney via Z-API, Firebase e Groq",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

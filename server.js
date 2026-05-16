@@ -8,8 +8,6 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 
 const REQUIRED_ENV = [
-  'ZAPI_INSTANCE',
-  'ZAPI_TOKEN',
   'FIREBASE_API_KEY',
   'FIREBASE_AUTH_DOMAIN',
   'FIREBASE_DB_URL',
@@ -17,13 +15,26 @@ const REQUIRED_ENV = [
   'FIREBASE_APP_ID',
 ];
 
+if (process.env.WHATSAPP_PROVIDER === 'evolution') {
+  REQUIRED_ENV.push(
+    'EVOLUTION_API_URL',
+    'EVOLUTION_API_KEY',
+    'EVOLUTION_INSTANCE'
+  );
+} else {
+  REQUIRED_ENV.push(
+    'ZAPI_INSTANCE',
+    'ZAPI_TOKEN'
+  );
+}
+
 const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
 if (missingEnv.length) {
   console.error(`❌ Variáveis de ambiente ausentes: ${missingEnv.join(', ')}`);
   process.exit(1);
 }
 
-if (!process.env.ZAPI_CLIENT_TOKEN) {
+if ((process.env.WHATSAPP_PROVIDER || 'zapi') !== 'evolution' && !process.env.ZAPI_CLIENT_TOKEN) {
   console.warn('⚠️ ZAPI_CLIENT_TOKEN não configurado. A Z-API pode recusar envios sem o header Client-Token.');
 }
 
@@ -45,20 +56,55 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
 
-// ─── Z-API ───────────────────────────────────────────────
+// ─── WHATSAPP PROVIDER: Z-API OU EVOLUTION ───────────────
+const WHATSAPP_PROVIDER = process.env.WHATSAPP_PROVIDER || 'zapi';
+
+// Z-API antigo, mantido como fallback
 const ZAPI_INSTANCE = process.env.ZAPI_INSTANCE;
 const ZAPI_TOKEN = process.env.ZAPI_TOKEN;
 const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN;
-const ZAPI_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
+const ZAPI_URL = ZAPI_INSTANCE && ZAPI_TOKEN
+  ? `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`
+  : null;
+
+// Evolution API novo
+const EVOLUTION_API_URL = process.env.EVOLUTION_API_URL;
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || 'salvamoney';
 
 async function sendMessage(phone, message, messageId) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (ZAPI_CLIENT_TOKEN) headers['Client-Token'] = ZAPI_CLIENT_TOKEN;
-
-  const payload = { phone, message };
-  if (messageId) payload.messageId = messageId;
-
   try {
+    if (WHATSAPP_PROVIDER === 'evolution') {
+      const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+      await axios.post(
+        `${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`,
+        {
+          number: cleanPhone,
+          text: message,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: EVOLUTION_API_KEY,
+          },
+          timeout: 15000,
+        }
+      );
+
+      return;
+    }
+
+    if (!ZAPI_URL) {
+      throw new Error('Z-API não configurada. Defina ZAPI_INSTANCE e ZAPI_TOKEN ou use WHATSAPP_PROVIDER=evolution.');
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (ZAPI_CLIENT_TOKEN) headers['Client-Token'] = ZAPI_CLIENT_TOKEN;
+
+    const payload = { phone, message };
+    if (messageId) payload.messageId = messageId;
+
     await axios.post(`${ZAPI_URL}/send-text`, payload, { headers, timeout: 15000 });
   } catch (e) {
     console.error('Erro ao enviar mensagem:', e.response?.status || '', e.response?.data || e.message);
@@ -210,11 +256,65 @@ function isSummaryCommand(msgMin) {
 }
 
 function getTextFromWebhook(body) {
-  return body?.text?.message || body?.body || body?.message?.text || '';
+  // Z-API
+  const zapiText = body?.text?.message || body?.body || body?.message?.text;
+  if (zapiText) return zapiText;
+
+  // Evolution API
+  const data = body?.data || body;
+  const msg = data?.message || {};
+
+  return (
+    msg?.conversation ||
+    msg?.extendedTextMessage?.text ||
+    msg?.imageMessage?.caption ||
+    msg?.videoMessage?.caption ||
+    ''
+  );
 }
 
 function getPhoneFromWebhook(body) {
-  return String(body?.phone || body?.sender || '').replace(/\D/g, '');
+  // Z-API
+  const zapiPhone = body?.phone || body?.sender;
+  if (zapiPhone) return String(zapiPhone).replace(/\D/g, '');
+
+  // Evolution API
+  const data = body?.data || body;
+  const remoteJid = data?.key?.remoteJid || data?.remoteJid || '';
+
+  return String(remoteJid)
+    .replace('@s.whatsapp.net', '')
+    .replace('@c.us', '')
+    .replace(/\D/g, '');
+}
+
+function isFromMeWebhook(body) {
+  // Z-API
+  if (body?.fromMe) return true;
+
+  // Evolution API
+  const data = body?.data || body;
+  return Boolean(data?.key?.fromMe);
+}
+
+function isGroupWebhook(body) {
+  // Z-API
+  if (body?.isGroup) return true;
+
+  // Evolution API
+  const data = body?.data || body;
+  const remoteJid = data?.key?.remoteJid || data?.remoteJid || '';
+  return String(remoteJid).includes('@g.us');
+}
+
+function getMessageIdFromWebhook(body) {
+  return (
+    body?.messageId ||
+    body?.zaapId ||
+    body?.id ||
+    body?.data?.key?.id ||
+    body?.key?.id
+  );
 }
 
 const MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
@@ -396,21 +496,30 @@ async function processarMensagem(phone, texto) {
   return '🤔 Não entendi. Tente:\n_gastei 50 almoço_\n_35 uber_\n_mercado 120,50_\n\nOu *ajuda* pra ver os comandos.';
 }
 
-// ─── WEBHOOK Z-API ───────────────────────────────────────
+// ─── WEBHOOK WHATSAPP: Z-API OU EVOLUTION ────────────────
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 
   try {
     const body = req.body || {};
-    if (body.fromMe) return;
-    if (body.isGroup) return;
+
+    // Ignora eventos que não são mensagens novas na Evolution
+    if (body.event && body.event !== 'messages.upsert') return;
+
+    if (isFromMeWebhook(body)) return;
+    if (isGroupWebhook(body)) return;
+
+    // Mantém compatibilidade com Z-API
     if (body.type && body.type !== 'ReceivedCallback') return;
 
     const phone = getPhoneFromWebhook(body);
     const texto = getTextFromWebhook(body);
-    const messageId = body.messageId || body.zaapId || body.id;
+    const messageId = getMessageIdFromWebhook(body);
 
-    if (!phone || !texto) return;
+    if (!phone || !texto) {
+      console.log('⚠️ Webhook recebido sem phone/texto:', JSON.stringify(body).slice(0, 500));
+      return;
+    }
 
     console.log(`📩 [${phone}] ${texto}`);
     const resposta = await processarMensagem(phone, texto);
@@ -422,7 +531,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (_req, res) => {
-  res.json({ status: 'ok', bot: 'SalvaMoney + Groq AI', version: '2.0.0' });
+  res.json({ status: 'ok', bot: 'SalvaMoney + Groq AI', whatsappProvider: WHATSAPP_PROVIDER, version: '2.1.0' });
 });
 
 app.get('/health', (_req, res) => {
